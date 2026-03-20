@@ -9,9 +9,6 @@ MuJoCo handles mouse picking natively — just Ctrl+click and drag a sphere.
 
     --n-robots N   number of arms to spawn (default: 1, max: 6)
 
-Scene: table + back wall + spotlight — same layout as the shadow art designer.
-Shadow frames are written to /tmp/shadow_frame.npy for a shadow viewer.
-
 Keys:
     Q   quit
 """
@@ -43,11 +40,6 @@ LEG_H     = 0.37
 
 WALL_Y = -1.10
 WALL_Z =  0.40
-
-SHADOW_W = 640
-SHADOW_H = 480
-SHADOW_HZ = 20
-SHADOW_FRAME = "/tmp/shadow_frame.npy"
 
 # One colour per arm (up to 6)
 MOCAP_COLORS = [
@@ -142,23 +134,15 @@ def load_model(urdf_path, n_robots):
                 f'</body>\n'
             )
 
-        shadow_cam_y = TABLE_Y + 0.90
-
         scene_xml = f"""<mujoco model="so100_mouse_teleop">
   <compiler angle="radian"/>
   <option gravity="0 0 0"/>
   <visual>
-    <headlight ambient="0.05 0.05 0.05" diffuse="0 0 0" specular="0 0 0"/>
-    <global offheight="{SHADOW_H}" offwidth="{SHADOW_W}"/>
-    <quality shadowsize="8192"/>
+    <headlight ambient="0.15 0.15 0.15" diffuse="0.5 0.5 0.5" specular="0 0 0"/>
+    <quality shadowsize="4096"/>
   </visual>
   <asset>{assets}</asset>
   <worldbody>
-
-    <camera name="shadow_cam"
-            pos="0 {shadow_cam_y:.3f} {WALL_Z:.3f}"
-            xyaxes="1 0 0  0 0 -1"
-            fovy="70"/>
 
     <light name="spot" pos="0 1.20 0.50" dir="0 -1 -0.10"
            diffuse="2.0 2.0 2.0" specular="0 0 0"
@@ -228,14 +212,6 @@ def ik_solve(model, data, target_pos, target_quat, ee_id, qslice):
         mujoco.mj_normalizeQuat(model, data.qpos)
 
 
-def extract_shadow(rgb):
-    gray = rgb.mean(axis=2).astype(np.float32)
-    max_val = gray.max()
-    if max_val < 10:
-        return np.full(gray.shape[:2], 255, dtype=np.uint8)
-    return np.where(gray < max_val * 0.75, 0, 255).astype(np.uint8)
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--urdf", required=True)
@@ -267,18 +243,6 @@ def main():
         data.mocap_pos[mid] = data.xpos[ee_ids[i]].copy()
     mujoco.mj_forward(model, data)
 
-    try:
-        import cv2
-        HAS_CV2 = True
-    except ImportError:
-        HAS_CV2 = False
-        print("[warn] opencv-python not found — shadow extraction disabled")
-
-    renderer = mujoco.Renderer(model, height=SHADOW_H, width=SHADOW_W)
-    cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "shadow_cam")
-    shadow_tick = 0
-    shadow_every = max(1, CTRL_HZ // SHADOW_HZ)
-
     state = {"quit": False}
 
     def key_cb(k):
@@ -308,14 +272,6 @@ def main():
             data.qvel[:] = 0
             mujoco.mj_forward(model, data)
             viewer.sync()
-
-            if shadow_tick % shadow_every == 0:
-                renderer.update_scene(data, camera=cam_id)
-                rgb = renderer.render()
-                shadow = extract_shadow(rgb)
-                np.save(SHADOW_FRAME, shadow)
-
-            shadow_tick += 1
             time.sleep(max(0, 1 / CTRL_HZ - (time.time() - t0)))
 
     print("Done.")

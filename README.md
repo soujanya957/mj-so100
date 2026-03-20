@@ -9,7 +9,7 @@ Simple MuJoCo scenes for the [SO-ARM100](https://github.com/TheRobotStudio/SO-AR
 | `01_simple_scene.py` | Minimal viewer — loads the arm, nothing else. Good starting point. |
 | `02_arm_viewer.py` | Arm on a wooden table with studio lighting and a looping demo trajectory. |
 | `03_keyboard_teleop.py` | Control the end-effector with arrow keys / W S. Orange sphere shows the IK target. |
-| `04_mouse_teleop.py` | Click-and-drag teleop. Spawn 1–6 arms with `--n-robots N`. Same scene layout as the shadow art designer. |
+| `04_mouse_teleop.py` | Click-and-drag teleop. Spawn 1–6 arms with `--n-robots N`. |
 
 ---
 
@@ -27,7 +27,7 @@ conda activate mujoco-so100
 MuJoCo 3.x ships as a Python wheel — no separate binary install needed.
 
 ```bash
-pip install mujoco
+pip install mujoco numpy
 ```
 
 On macOS, use `mjpython` (bundled with the wheel) instead of `python` to launch
@@ -41,16 +41,7 @@ mjpython 01_simple_scene.py --urdf path/to/so100.urdf
 python 01_simple_scene.py --urdf path/to/so100.urdf
 ```
 
-### 3. Install optional dependencies
-
-```bash
-pip install numpy opencv-python
-```
-
-`opencv-python` is only needed for the shadow-frame extraction in `04_mouse_teleop.py`.
-Every script works without it — you'll just see a warning.
-
-### 4. Get the SO100 URDF
+### 3. Get the SO100 URDF
 
 Clone the official repo (or copy your existing `SO100_urdf/` folder):
 
@@ -101,26 +92,10 @@ Standard viewer controls still work: left-drag to orbit, scroll to zoom, right-d
 
 ---
 
-## Shadow frames
-
-`04_mouse_teleop.py` writes rendered shadow frames to `/tmp/shadow_frame.npy` at 20 Hz.
-These can be read by a shadow viewer running in a second terminal:
-
-```python
-import numpy as np, time
-while True:
-    frame = np.load("/tmp/shadow_frame.npy")
-    # do something with frame (uint8 H×W, 0=shadow 255=lit)
-    time.sleep(0.05)
-```
-
----
-
-## Requirements summary
+## Requirements
 
 ```
 python  >= 3.10
 mujoco  >= 3.0
 numpy
-opencv-python   (optional, for shadow extraction)
 ```
