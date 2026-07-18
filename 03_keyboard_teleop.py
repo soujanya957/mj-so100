@@ -31,16 +31,16 @@ IK_DAMPING = 1e-3
 IK_ITERS = 40
 IK_ALPHA = 0.5
 CTRL_HZ = 60
-STEP = 0.008          # metres moved per key event
+STEP = 0.008  # metres moved per key event
 
 TABLE_Y = 0.30
 HOME = np.array([0.0, TABLE_Y - 0.10, 0.25])
 
 # MuJoCo GLFW key codes
 KEY_RIGHT = 262
-KEY_LEFT  = 263
-KEY_DOWN  = 264
-KEY_UP    = 265
+KEY_LEFT = 263
+KEY_DOWN = 264
+KEY_UP = 265
 
 
 def patch_urdf(xml):
@@ -57,6 +57,7 @@ def patch_urdf(xml):
             "      </geometry>\n    </collision>"
         )
         return m.group(0).replace("</link>", cb + "\n  </link>")
+
     return re.sub(r"<link[^>]*>(.*?)</link>", add_collision, xml, flags=re.DOTALL)
 
 
@@ -119,7 +120,7 @@ def load_model(urdf_path):
       {wb}
     </body>
     <!-- IK target marker — the orange sphere you're steering -->
-    <body name="ee_target" pos="0 {TABLE_Y-0.10:.2f} 0.25" mocap="true">
+    <body name="ee_target" pos="0 {TABLE_Y - 0.10:.2f} 0.25" mocap="true">
       <geom type="sphere" size="0.022" rgba="1 0.45 0 0.85"/>
     </body>
   </worldbody>
@@ -146,7 +147,7 @@ def ik_step(model, data, target, ee_id):
         mujoco.mj_jacBody(model, data, J[:3], J[3:], ee_id)
         Jp = J[:3]
         dq = IK_ALPHA * Jp.T @ np.linalg.solve(Jp @ Jp.T + IK_DAMPING * np.eye(3), err)
-        data.qpos[:model.nv] += np.clip(dq, -0.1, 0.1)
+        data.qpos[: model.nv] += np.clip(dq, -0.1, 0.1)
         mujoco.mj_normalizeQuat(model, data.qpos)
 
 
@@ -182,7 +183,7 @@ def main():
         elif k == KEY_LEFT:
             nudge["dx"] -= STEP
         elif k == KEY_UP:
-            nudge["dy"] -= STEP   # forward = more negative Y (toward wall)
+            nudge["dy"] -= STEP  # forward = more negative Y (toward wall)
         elif k == KEY_DOWN:
             nudge["dy"] += STEP
         elif k == ord("W"):

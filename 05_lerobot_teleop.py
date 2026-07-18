@@ -57,6 +57,7 @@ KEY_UP = 265
 
 def patch_urdf(xml):
     """Add <collision> to visual-only links so MuJoCo creates geoms."""
+
     def add_collision(m):
         lc = m.group(1)
         if "<collision>" in lc:
@@ -70,6 +71,7 @@ def patch_urdf(xml):
             "      </geometry>\n    </collision>"
         )
         return m.group(0).replace("</link>", cb + "\n  </link>")
+
     return re.sub(r"<link[^>]*>(.*?)</link>", add_collision, xml, flags=re.DOTALL)
 
 
@@ -135,10 +137,12 @@ def load_model(urdf_path):
     return model, mujoco.MjData(model)
 
 
-def ik_step(model, data, target, ee_id, wrist_roll_idx):
+def ik_step(model, data, target, ee_id, wrist_roll_dof, gripper_dof):
     """Damped least-squares IK, position only. Excludes wrist_roll and gripper."""
-    # IK joint indices: all arm joints except wrist_roll (idx 4) and gripper (idx 5)
-    ik_indices = [i for i in range(model.nv) if i != wrist_roll_idx and i != model.nv - 1]
+    # Use DOF-space indices (jnt_dofadr), not qpos-space indices (jnt_qposadr)
+    ik_indices = [
+        i for i in range(model.nv) if i != wrist_roll_dof and i != gripper_dof
+    ]
 
     for _ in range(IK_ITERS):
         mujoco.mj_fwdPosition(model, data)
@@ -149,15 +153,20 @@ def ik_step(model, data, target, ee_id, wrist_roll_idx):
         mujoco.mj_jacBody(model, data, J[:3], J[3:], ee_id)
         Jp = J[:3][:, ik_indices]
         dq = IK_ALPHA * Jp.T @ np.linalg.solve(Jp @ Jp.T + IK_DAMPING * np.eye(3), err)
-        for k, idx in enumerate(ik_indices):
-            data.qpos[idx] += np.clip(dq[k], -0.1, 0.1)
+        for k, dof_idx in enumerate(ik_indices):
+            jid = model.dof_jntid[dof_idx]
+            qpos_idx = model.jnt_qposadr[jid]
+            data.qpos[qpos_idx] += np.clip(dq[k], -0.1, 0.1)
 
         # Clamp limited joints
-        for idx in ik_indices:
-            jid = model.dof_jntid[idx]
+        for dof_idx in ik_indices:
+            jid = model.dof_jntid[dof_idx]
             if model.jnt_limited[jid]:
-                data.qpos[idx] = np.clip(
-                    data.qpos[idx], model.jnt_range[jid, 0], model.jnt_range[jid, 1]
+                qpos_idx = model.jnt_qposadr[jid]
+                data.qpos[qpos_idx] = np.clip(
+                    data.qpos[qpos_idx],
+                    model.jnt_range[jid, 0],
+                    model.jnt_range[jid, 1],
                 )
 
 
@@ -178,22 +187,28 @@ def connect_robot(port, robot_id):
 # Corrections for joints where MuJoCo and lerobot conventions differ
 # real_deg = mujoco_deg * scale + offset
 JOINT_CORRECTIONS = {
-    "shoulder_pan":  {"scale": 1.0, "offset": 0.0},
-    "shoulder_lift": {"scale": 1.0, "offset": 0.0},
-    "elbow_flex":    {"scale": 1.0, "offset": 0.0},
-    "wrist_flex":    {"scale": 1.0, "offset": 90.0},
-    "wrist_roll":    {"scale": 1.0, "offset": 105.0},
+    "shoulder_pan": {"scale": 0.9447, "offset": 1.47},
+    "shoulder_lift": {"scale": 0.2949, "offset": 21.93},
+    "elbow_flex": {"scale": 0.3529, "offset": 18.59},
+    "wrist_flex": {"scale": 1.0067, "offset": -3.43},
+    "wrist_roll": {"scale": 0.9288, "offset": -7.81},
 }
 
 
-def mujoco_qpos_to_lerobot_action(qpos_rad, gripper_deg):
-    """Convert MuJoCo joint angles (radians) to lerobot action dict (degrees)."""
-    joint_deg = np.rad2deg(qpos_rad[:5])  # first 5 arm joints
+def mujoco_qpos_to_lerobot_action(model, data, gripper_deg):
+    """Convert MuJoCo joint angles to lerobot action dict (degrees).
 
+    Uses name-based joint lookup so joint order in URDF doesn't matter.
+    NOTE: JOINT_CORRECTIONS must be recalibrated via 06_calibrate_visual.py
+    if the robot does not track correctly.
+    """
     action = {}
-    for i, name in enumerate(JOINT_NAMES[:5]):
+    for name in JOINT_NAMES[:5]:
+        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        val_rad = data.qpos[model.jnt_qposadr[jid]]
+        val_deg = np.rad2deg(val_rad)
         cor = JOINT_CORRECTIONS[name]
-        action[f"{name}.pos"] = float(joint_deg[i] * cor["scale"] + cor["offset"])
+        action[f"{name}.pos"] = float(val_deg * cor["scale"] + cor["offset"])
     action["gripper.pos"] = float(gripper_deg)
     return action
 
@@ -218,7 +233,9 @@ def diagnose_joint(robot, model, joint_name, steps=20):
     print(f"MuJoCo URDF range: {sim_lo_deg:.1f} to {sim_hi_deg:.1f} deg")
     print(f"Current correction: scale={cor['scale']}, offset={cor['offset']}")
     print(f"Sweeping {steps} steps from min to max...\n")
-    print(f"{'Step':>4}  {'Sim(deg)':>10}  {'Sent(deg)':>10}  {'Real(deg)':>10}  {'Delta':>10}")
+    print(
+        f"{'Step':>4}  {'Sim(deg)':>10}  {'Sent(deg)':>10}  {'Real(deg)':>10}  {'Delta':>10}"
+    )
     print("-" * 56)
 
     sweep = np.linspace(sim_lo_deg, sim_hi_deg, steps)
@@ -241,7 +258,9 @@ def diagnose_joint(robot, model, joint_name, steps=20):
         delta = real_deg - sent_deg
 
         results.append((sim_deg, sent_deg, real_deg, delta))
-        print(f"{i:4d}  {sim_deg:10.2f}  {sent_deg:10.2f}  {real_deg:10.2f}  {delta:+10.2f}")
+        print(
+            f"{i:4d}  {sim_deg:10.2f}  {sent_deg:10.2f}  {real_deg:10.2f}  {delta:+10.2f}"
+        )
 
     # Analyze: find where real motor stopped tracking
     real_vals = [r[2] for r in results]
@@ -251,17 +270,21 @@ def diagnose_joint(robot, model, joint_name, steps=20):
     print(f"\n--- Analysis ---")
     print(f"Sim range:  {sim_range:.1f} deg")
     print(f"Real range: {real_range:.1f} deg")
-    print(f"Real min:   {min(real_vals):.1f} deg  (at sim {results[real_vals.index(min(real_vals))][0]:.1f})")
-    print(f"Real max:   {max(real_vals):.1f} deg  (at sim {results[real_vals.index(max(real_vals))][0]:.1f})")
+    print(
+        f"Real min:   {min(real_vals):.1f} deg  (at sim {results[real_vals.index(min(real_vals))][0]:.1f})"
+    )
+    print(
+        f"Real max:   {max(real_vals):.1f} deg  (at sim {results[real_vals.index(max(real_vals))][0]:.1f})"
+    )
 
     # Check for saturation (real stops moving)
     stall_lo = None
     stall_hi = None
     for i in range(1, len(results)):
-        if abs(real_vals[i] - real_vals[i-1]) < 0.5 and stall_lo is None:
+        if abs(real_vals[i] - real_vals[i - 1]) < 0.5 and stall_lo is None:
             stall_lo = results[i][0]
-        if abs(real_vals[-(i+1)] - real_vals[-i]) < 0.5 and stall_hi is None:
-            stall_hi = results[-(i+1)][0]
+        if abs(real_vals[-(i + 1)] - real_vals[-i]) < 0.5 and stall_hi is None:
+            stall_hi = results[-(i + 1)][0]
 
     if stall_lo is not None:
         print(f"Real motor stalls at LOW end around sim={stall_lo:.1f} deg")
@@ -270,8 +293,11 @@ def diagnose_joint(robot, model, joint_name, steps=20):
 
     # Suggest correction
     # Find the linear fit between sim and real in the region where real is moving
-    moving = [(s, r) for s, _, r, _ in results
-              if r > min(real_vals) + 1.0 and r < max(real_vals) - 1.0]
+    moving = [
+        (s, r)
+        for s, _, r, _ in results
+        if r > min(real_vals) + 1.0 and r < max(real_vals) - 1.0
+    ]
     if len(moving) >= 2:
         sim_pts = np.array([m[0] for m in moving])
         real_pts = np.array([m[1] for m in moving])
@@ -279,15 +305,27 @@ def diagnose_joint(robot, model, joint_name, steps=20):
         A = np.vstack([sim_pts, np.ones(len(sim_pts))]).T
         scale_fit, offset_fit = np.linalg.lstsq(A, real_pts, rcond=None)[0]
         print(f"\nSuggested correction:")
-        print(f'    "{joint_name}": {{"scale": {scale_fit:.4f}, "offset": {offset_fit:.2f}}},')
+        print(
+            f'    "{joint_name}": {{"scale": {scale_fit:.4f}, "offset": {offset_fit:.2f}}},'
+        )
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--urdf", required=True, help="Path to SO-101 URDF")
-    parser.add_argument("--port", default=None, help="COM port for real robot (e.g. COM3). Omit for sim-only.")
-    parser.add_argument("--robot-id", default="so101", help="Robot ID for lerobot calibration")
-    parser.add_argument("--diagnose", default=None, help="Diagnose a joint mapping (e.g. --diagnose wrist_roll)")
+    parser.add_argument(
+        "--port",
+        default=None,
+        help="COM port for real robot (e.g. COM3). Omit for sim-only.",
+    )
+    parser.add_argument(
+        "--robot-id", default="so101", help="Robot ID for lerobot calibration"
+    )
+    parser.add_argument(
+        "--diagnose",
+        default=None,
+        help="Diagnose a joint mapping (e.g. --diagnose wrist_roll)",
+    )
     args = parser.parse_args()
 
     model, data = load_model(args.urdf)
@@ -295,14 +333,27 @@ def main():
 
     ee_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, EE_BODY)
     if ee_id == -1:
-        all_bodies = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i) for i in range(model.nbody)]
+        all_bodies = [
+            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i)
+            for i in range(model.nbody)
+        ]
         print(f"Body '{EE_BODY}' not found. Available bodies:")
         for i, name in enumerate(all_bodies):
             print(f"  [{i}] {name}")
-        raise ValueError(f"Body '{EE_BODY}' not found. Pick one from the list above and set EE_BODY.")
+        raise ValueError(
+            f"Body '{EE_BODY}' not found. Pick one from the list above and set EE_BODY."
+        )
 
     target_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "ee_target")
     mocap_id = model.body_mocapid[target_body_id]
+
+    # Look up wrist_roll and gripper DOF indices once (used by IK and main loop)
+    wrist_roll_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "wrist_roll")
+    wrist_roll_qpos = model.jnt_qposadr[wrist_roll_jid]
+    wrist_roll_dof = model.jnt_dofadr[wrist_roll_jid]
+    grip_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "gripper")
+    grip_qpos = model.jnt_qposadr[grip_jid]
+    gripper_dof = model.jnt_dofadr[grip_jid]
 
     # Start from current EE position
     home = data.xpos[ee_id].copy()
@@ -393,26 +444,22 @@ def main():
             target[1] = np.clip(target[1], -0.30, 0.30)
             target[2] = np.clip(target[2], 0.02, 0.42)
 
-            # Apply wrist roll (directly set qpos for wrist_roll joint, index 4)
-            wrist_roll_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "wrist_roll")
-            wrist_roll_idx = model.jnt_qposadr[wrist_roll_jid]
-            data.qpos[wrist_roll_idx] += nudge["roll"]
+            # Apply wrist roll directly via name-looked-up qpos index
+            data.qpos[wrist_roll_qpos] += nudge["roll"]
             nudge["roll"] = 0.0
             # Clamp wrist roll to real motor's usable range (~-57 to +163 deg sim)
-            data.qpos[wrist_roll_idx] = np.clip(
-                data.qpos[wrist_roll_idx],
+            data.qpos[wrist_roll_qpos] = np.clip(
+                data.qpos[wrist_roll_qpos],
                 np.deg2rad(-57.0),
                 np.deg2rad(163.0),
             )
 
             data.mocap_pos[mocap_id] = target.copy()
-            ik_step(model, data, target, ee_id, wrist_roll_idx)
+            ik_step(model, data, target, ee_id, wrist_roll_dof, gripper_dof)
 
-            # Update gripper joint in sim (qpos index 5 = gripper)
-            # Map gripper_deg 0-100% to joint range
-            grip_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "gripper")
+            # Update gripper joint in sim — map gripper_deg 0-100% to joint range
             grip_lo, grip_hi = model.jnt_range[grip_jid]
-            data.qpos[model.jnt_qposadr[grip_jid]] = grip_lo + (gripper_deg / 100.0) * (grip_hi - grip_lo)
+            data.qpos[grip_qpos] = grip_lo + (gripper_deg / 100.0) * (grip_hi - grip_lo)
 
             data.qvel[:] = 0
             mujoco.mj_forward(model, data)
@@ -420,7 +467,7 @@ def main():
 
             # Send to real robot
             if robot is not None:
-                action = mujoco_qpos_to_lerobot_action(data.qpos, gripper_deg)
+                action = mujoco_qpos_to_lerobot_action(model, data, gripper_deg)
                 try:
                     robot.send_action(action)
                 except Exception as e:
